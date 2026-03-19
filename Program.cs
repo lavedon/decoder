@@ -6,6 +6,9 @@ using Spectre.Console;
 bool plain = false;
 string mode = "auto";
 string? inputArg = null;
+string? filePath = null;
+string? outputPath = null;
+StringBuilder outputCapture = new();
 
 // Parse arguments
 for (int i = 0; i < args.Length; i++)
@@ -30,6 +33,28 @@ for (int i = 0; i < args.Length; i++)
         continue;
     }
 
+    if (arg is "file" or "f")
+    {
+        if (i + 1 >= args.Length)
+        {
+            PrintError("--file requires a path. Example: --file myCapture.txt");
+            return 1;
+        }
+        filePath = args[++i];
+        continue;
+    }
+
+    if (arg is "output" or "o")
+    {
+        if (i + 1 >= args.Length)
+        {
+            PrintError("--output requires a path. Example: --output decoded.txt");
+            return 1;
+        }
+        outputPath = args[++i];
+        continue;
+    }
+
     if (!args[i].StartsWith('-'))
     {
         inputArg = args[i];
@@ -44,7 +69,16 @@ for (int i = 0; i < args.Length; i++)
 // Determine input source
 string? input = inputArg;
 
-if (input is null && Console.IsInputRedirected)
+if (filePath is not null)
+{
+    if (!File.Exists(filePath))
+    {
+        PrintError($"File not found: {filePath}");
+        return 1;
+    }
+    input = File.ReadAllText(filePath).TrimEnd('\r', '\n');
+}
+else if (input is null && Console.IsInputRedirected)
 {
     input = Console.In.ReadToEnd().TrimEnd('\r', '\n');
 }
@@ -62,6 +96,7 @@ if (string.IsNullOrWhiteSpace(input))
 }
 
 Decode(input, mode);
+FlushOutput();
 return 0;
 
 // ── Core ─────────────────────────────────────────────────────────────
@@ -290,6 +325,10 @@ void DisplayDecoded(string label, string decoded)
         AnsiConsole.Write(panel);
         AnsiConsole.WriteLine();
     }
+
+    CaptureOutput($"[{label}]");
+    CaptureOutput(decoded);
+    CaptureOutput("");
 }
 
 void DisplayFormTable(List<KeyValuePair<string, string>> pairs)
@@ -315,23 +354,78 @@ void DisplayFormTable(List<KeyValuePair<string, string>> pairs)
         AnsiConsole.Write(table);
         AnsiConsole.WriteLine();
     }
+
+    CaptureOutput("[Form Body]");
+    foreach (var kv in pairs)
+        CaptureOutput($"  {kv.Key}\t{kv.Value}");
+    CaptureOutput("");
 }
 
 // ── Interactive ──────────────────────────────────────────────────────
 
 int RunInteractive()
 {
-    AnsiConsole.MarkupLine("[bold blue]decoder[/] — [dim]interactive mode (type 'exit' to quit)[/]");
+    AnsiConsole.MarkupLine("[bold blue]decoder[/] — [dim]interactive mode[/]");
     AnsiConsole.WriteLine();
 
     while (true)
     {
-        var input = AnsiConsole.Prompt(
-            new TextPrompt<string>("[bold blue]Paste input:[/]")
-                .AllowEmpty());
+        var action = AnsiConsole.Prompt(
+            new SelectionPrompt<string>()
+                .Title("[bold blue]What would you like to do?[/]")
+                .AddChoices("Paste input", "Load from file", "Export last result", "Exit"));
 
-        if (string.IsNullOrWhiteSpace(input) || input.Equals("exit", StringComparison.OrdinalIgnoreCase))
+        if (action == "Exit")
             return 0;
+
+        if (action == "Export last result")
+        {
+            if (outputCapture.Length == 0)
+            {
+                PrintWarning("Nothing to export yet. Decode something first.");
+                AnsiConsole.WriteLine();
+                continue;
+            }
+
+            var exportPath = AnsiConsole.Prompt(
+                new TextPrompt<string>("[bold]Export path:[/]"));
+
+            if (!string.IsNullOrWhiteSpace(exportPath))
+            {
+                File.WriteAllText(exportPath, outputCapture.ToString());
+                PrintSuccess($"Exported to {exportPath}");
+            }
+            AnsiConsole.WriteLine();
+            continue;
+        }
+
+        string? input = null;
+
+        if (action == "Load from file")
+        {
+            var path = AnsiConsole.Prompt(
+                new TextPrompt<string>("[bold]File path:[/]"));
+
+            if (!File.Exists(path))
+            {
+                PrintError($"File not found: {path}");
+                AnsiConsole.WriteLine();
+                continue;
+            }
+            input = File.ReadAllText(path).TrimEnd('\r', '\n');
+        }
+        else
+        {
+            input = AnsiConsole.Prompt(
+                new TextPrompt<string>("[bold blue]Paste input:[/]")
+                    .AllowEmpty());
+        }
+
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            AnsiConsole.WriteLine();
+            continue;
+        }
 
         var modeChoice = AnsiConsole.Prompt(
             new SelectionPrompt<string>()
@@ -345,6 +439,7 @@ int RunInteractive()
             _ => "auto"
         };
 
+        outputCapture.Clear();
         AnsiConsole.WriteLine();
         Decode(input, selectedMode);
     }
@@ -365,8 +460,14 @@ void PrintUsage()
         Console.WriteLine("  --base64       Base64 decode only");
         Console.WriteLine("  --auto         Auto-detect (default)");
         Console.WriteLine();
-        Console.WriteLine("Options:");
+        Console.WriteLine("Input:");
+        Console.WriteLine("  --file, -f     Read input from a file");
+        Console.WriteLine();
+        Console.WriteLine("Output:");
+        Console.WriteLine("  --output, -o   Export decoded result to a file");
         Console.WriteLine("  --plain        Plain output (no colors)");
+        Console.WriteLine();
+        Console.WriteLine("General:");
         Console.WriteLine("  --help, -h     Show this help");
         Console.WriteLine();
         Console.WriteLine("No arguments launches interactive mode.");
@@ -375,7 +476,8 @@ void PrintUsage()
         Console.WriteLine("  decode                              Interactive REPL");
         Console.WriteLine("  decode \"Hello%20World\"              URL decode");
         Console.WriteLine("  decode \"SGVsbG8gV29ybGQ=\"           Base64 decode");
-        Console.WriteLine("  decode \"name=John%20Doe&age=30\"     Form body table");
+        Console.WriteLine("  decode -f myCapture.txt             Decode from file");
+        Console.WriteLine("  decode -f myCapture.log -o out.txt  File in, file out");
         Console.WriteLine("  echo \"dGVzdA==\" | decode            Piped input");
     }
     else
@@ -387,16 +489,22 @@ void PrintUsage()
                 new Markup("  [green]--base64[/]       Base64 decode only"),
                 new Markup("  [green]--auto[/]         Auto-detect (default)"),
                 new Markup(""),
-                new Markup("[bold]Options:[/]"),
+                new Markup("[bold]Input:[/]"),
+                new Markup("  [green]--file[/], [green]-f[/]     Read input from a file"),
+                new Markup(""),
+                new Markup("[bold]Output:[/]"),
+                new Markup("  [green]--output[/], [green]-o[/]   Export decoded result to a file"),
                 new Markup("  [green]--plain[/]        Plain output (no colors)"),
+                new Markup(""),
+                new Markup("[bold]General:[/]"),
                 new Markup("  [green]--help[/], [green]-h[/]     Show this help"),
                 new Markup(""),
                 new Markup("[dim]No arguments launches interactive mode.[/]"),
                 new Markup(""),
                 new Markup("[bold]Examples:[/]"),
                 new Markup("  [dim]decode \"Hello%20World\"[/]"),
-                new Markup("  [dim]decode \"SGVsbG8gV29ybGQ=\"[/]"),
-                new Markup("  [dim]decode \"name=John%20Doe&age=30\"[/]"),
+                new Markup("  [dim]decode -f myCapture.txt[/]"),
+                new Markup("  [dim]decode -f myCapture.log -o out.txt[/]"),
                 new Markup("  [dim]echo \"dGVzdA==\" | decode[/]")
             ))
             .Header("[bold blue]decoder[/] — Decode URL-encoded strings, Base64, and HTTP form bodies")
@@ -404,6 +512,20 @@ void PrintUsage()
             .Padding(1, 0);
 
         AnsiConsole.Write(panel);
+    }
+}
+
+void CaptureOutput(string line)
+{
+    outputCapture.AppendLine(line);
+}
+
+void FlushOutput()
+{
+    if (outputPath is not null && outputCapture.Length > 0)
+    {
+        File.WriteAllText(outputPath, outputCapture.ToString());
+        PrintSuccess($"Exported to {outputPath}");
     }
 }
 
